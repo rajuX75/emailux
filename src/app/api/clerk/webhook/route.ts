@@ -2,26 +2,7 @@ import { db } from "@/server/db";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
-// Define types for Clerk webhook payload
-interface ClerkEmailAddress {
-  email_address: string;
-  id: string;
-  verification: {
-    status: string;
-    strategy: string;
-  };
-}
-
-interface ClerkExternalAccount {
-  email_address: string;
-  given_name: string;
-  family_name: string;
-  picture: string;
-  approved_scopes: string;
-  google_id?: string;
-}
-
-// Validation schema for webhook payload
+// Updated validation schema with proper nullable fields
 const webhookSchema = z.object({
   data: z.object({
     id: z.string(),
@@ -39,8 +20,8 @@ const webhookSchema = z.object({
       .array(
         z.object({
           email_address: z.string().email(),
-          given_name: z.string().nullable(),
-          family_name: z.string().nullable(),
+          given_name: z.string().nullable().optional(), // Made nullable and optional
+          family_name: z.string().nullable().optional(), // Made nullable and optional
           picture: z.string().url().optional(),
           approved_scopes: z.string(),
           google_id: z.string().optional(),
@@ -60,7 +41,6 @@ const webhookSchema = z.object({
 
 export const POST = async (req: Request) => {
   try {
-    // Validate request has a body
     if (!req.body) {
       return new Response("Missing request body", {
         status: 400,
@@ -68,18 +48,19 @@ export const POST = async (req: Request) => {
       });
     }
 
-    // Parse request body
     const rawBody = await req.json();
 
-    // Validate webhook data against schema
+    // Log incoming webhook data for debugging
+    console.log("Incoming webhook data:", JSON.stringify(rawBody, null, 2));
+
     const validatedData = webhookSchema.safeParse(rawBody);
 
     if (!validatedData.success) {
-      console.error("Validation error:", validatedData.error);
+      console.error("Validation error:", validatedData.error.format());
       return new Response(
         JSON.stringify({
           error: "Invalid webhook payload",
-          details: validatedData.error.errors,
+          details: validatedData.error.format(),
         }),
         {
           status: 400,
@@ -96,10 +77,10 @@ export const POST = async (req: Request) => {
       return new Response("No email address found", { status: 400 });
     }
 
-    // Extract external account info (if exists)
+    // Extract external account info (if exists) with null handling
     const externalAccount = data.external_accounts?.[0];
 
-    // Prepare user data
+    // Prepare user data with proper null handling
     const userData = {
       id: data.id,
       emailAddress: primaryEmail.email_address,
@@ -111,18 +92,22 @@ export const POST = async (req: Request) => {
       updatedAtClerk: new Date(data.updated_at),
       banned: data.banned,
       externalId: data.external_id,
-      // Store OAuth details if available
       oauthProvider: externalAccount ? "google" : null,
       oauthId: externalAccount?.google_id ?? null,
       oauthScopes: externalAccount?.approved_scopes ?? null,
     };
 
+    // Log processed user data for debugging
+    console.log("Processing user data:", userData);
+
     // Upsert user data
-    await db.user.upsert({
+    const updatedUser = await db.user.upsert({
       where: { id: data.id },
       update: userData,
       create: userData,
     });
+
+    console.log("User upserted successfully:", updatedUser.id);
 
     // Store email addresses
     for (const email of data.email_addresses) {
@@ -144,7 +129,10 @@ export const POST = async (req: Request) => {
     }
 
     return new Response(
-      JSON.stringify({ message: "Webhook processed successfully" }),
+      JSON.stringify({
+        message: "Webhook processed successfully",
+        userId: updatedUser.id,
+      }),
       {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -154,7 +142,6 @@ export const POST = async (req: Request) => {
     console.error("Webhook processing error:", error);
 
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      // Handle specific Prisma errors
       const prismaErrors: Record<string, { status: number; message: string }> =
         {
           P2002: { status: 409, message: "Resource already exists" },
@@ -171,6 +158,7 @@ export const POST = async (req: Request) => {
         JSON.stringify({
           error: errorInfo.message,
           code: error.code,
+          details: error.message,
         }),
         {
           status: errorInfo.status,
